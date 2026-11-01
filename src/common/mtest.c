@@ -27,11 +27,16 @@ int eulpl(long double x)
 #if LDBL_MANT_DIG == 53
 	return eulp(x);
 #elif LDBL_MANT_DIG == 64
+#ifdef __m68k__
+	union { long double f; struct {uint16_t e; uint16_t pad; uint64_t m;} i; } u = { x };
+	int e = u.i.e & 0x7fff;
+#else
 	union { long double f; struct {uint64_t m; uint16_t e; uint16_t pad;} i; } u = { x };
 	int e = u.i.e & 0x7fff;
 
 	if (!e)
 		e++;
+#endif
 	return e - 0x3fff - 63;
 #else
 	// TODO
