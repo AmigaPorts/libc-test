@@ -101,6 +101,12 @@ float ulperrl(long double got, long double want, float dwant);
 
 static int checkexcept(int got, int want, int r)
 {
+#ifdef math_errhandling
+	/* without MATH_ERREXCEPT, C doesn't require the math functions to
+	   raise any flags (C11 7.12.1), so there is nothing to compare */
+	if (!(math_errhandling & MATH_ERREXCEPT))
+		return 1;
+#endif
 	if (r == RN)
 #if defined CHECK_INEXACT
 		return got == want;
