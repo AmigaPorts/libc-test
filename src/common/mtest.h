@@ -1,6 +1,9 @@
+#include <errno.h>
 #include <fenv.h>
 #include <float.h>
 #include <math.h>
+#include <stdio.h>
+#include <string.h>
 
 #undef RN
 #undef RZ
@@ -27,6 +30,15 @@
 #define RU -1
 #endif
 
+/* A runtime that reports math errors through errno alone, without the
+   exception flags, gets its errno checked against the flags the tests
+   expect.  Its fenv.h may not define the flags at all, so they get bits of
+   their own, which only say what the test expects.  */
+#if defined(math_errhandling) && (math_errhandling & MATH_ERRNO) \
+    && !(math_errhandling & MATH_ERREXCEPT)
+#define MTEST_ERRNO_ONLY
+#endif
+
 #undef INEXACT
 #undef INVALID
 #undef DIVBYZERO
@@ -34,26 +46,36 @@
 #undef OVERFLOW
 #ifdef FE_INEXACT
 #define INEXACT FE_INEXACT
+#elif defined MTEST_ERRNO_ONLY
+#define INEXACT (1<<24)
 #else
 #define INEXACT 0
 #endif
 #ifdef FE_INVALID
 #define INVALID FE_INVALID
+#elif defined MTEST_ERRNO_ONLY
+#define INVALID (1<<25)
 #else
 #define INVALID 0
 #endif
 #ifdef FE_DIVBYZERO
 #define DIVBYZERO FE_DIVBYZERO
+#elif defined MTEST_ERRNO_ONLY
+#define DIVBYZERO (1<<26)
 #else
 #define DIVBYZERO 0
 #endif
 #ifdef FE_UNDERFLOW
 #define UNDERFLOW FE_UNDERFLOW
+#elif defined MTEST_ERRNO_ONLY
+#define UNDERFLOW (1<<27)
 #else
 #define UNDERFLOW 0
 #endif
 #ifdef FE_OVERFLOW
 #define OVERFLOW FE_OVERFLOW
+#elif defined MTEST_ERRNO_ONLY
+#define OVERFLOW (1<<28)
 #else
 #define OVERFLOW 0
 #endif
@@ -99,7 +121,124 @@ float ulperr(double got, double want, float dwant);
 float ulperrf(float got, float want, float dwant);
 float ulperrl(long double got, long double want, float dwant);
 
-static int checkexcept(int got, int want, int r)
+/* errno as the function under test left it: the tests call feclearexcept()
+   right before it, which clears errno too, and fetestexcept() right after,
+   whose first call keeps errno.  */
+static int mtest_errno, mtest_errno_state;
+/* Whether the last check found errno wrong, for the tests that tolerate
+   some flag mismatches: the tolerance is for the flags, not for errno.  */
+static int mtest_errno_bad;
+
+static int mtest_feclearexcept(int e)
+{
+	errno = 0;
+	mtest_errno_state = 1;
+	return feclearexcept(e);
+}
+
+static int mtest_fetestexcept(int e)
+{
+	if (mtest_errno_state == 1) {
+		mtest_errno = errno;
+		mtest_errno_state = 2;
+	}
+	return fetestexcept(e);
+}
+
+#define feclearexcept mtest_feclearexcept
+#define fetestexcept mtest_fetestexcept
+
+/* Whether file, the test's source, is the test of one of names: of
+   "exp.c" for "exp", or of its float and long double variants.  */
+static int mtest_func(const char *file, const char *const *names)
+{
+	const char *b = strrchr(file, '/');
+	size_t n;
+
+	b = b ? b + 1 : file;
+	n = strcspn(b, ".");
+	for (; *names; names++) {
+		size_t m = strlen(*names);
+		if (!strncmp(b, *names, m)
+		    && (n == m || (n == m + 1 && (b[m] == 'f' || b[m] == 'l'))))
+			return 1;
+	}
+	return 0;
+}
+
+/* With MATH_ERRNO, C11 7.12.1 wants errno to be EDOM after a domain error
+   and ERANGE after a pole error or an overflow; after an underflow ERANGE
+   is up to the implementation.  Here a domain error is a result that raises
+   INVALID, a pole error DIVBYZERO, and the range errors OVERFLOW and
+   UNDERFLOW, so:
+   - with none of them, errno stays 0: the math functions document their use
+     of errno, so they may not set it otherwise (C11 7.5p3);
+   - with INVALID or DIVBYZERO, it is 0, EDOM or ERANGE, as several of these
+     are "a domain error or a pole error may occur";
+   - with OVERFLOW or UNDERFLOW alone, it is 0 or ERANGE;
+   - it must be set where C says the error "occurs", not that it "may":
+     EDOM for the INVALID results of the functions in domain_errors, and
+     ERANGE for the OVERFLOW results of those in overflows.
+   Outside round-to-nearest, as checkexcept() does for the flag, an
+   underflow may or may not be there.  */
+static int mtest_checkerrno(const char *file, int want, int r)
+{
+	static const char *const domain_errors[] = {
+		"acos", "asin", "acosh", "atanh", "sqrt",
+		"log", "log10", "log2", "log1p", 0
+	};
+	static const char *const overflows[] = {
+		"exp", "exp2", "expm1", "cosh", "sinh", "lgamma", "tgamma", 0
+	};
+	/* not in C, so not covered by math_errhandling */
+	static const char *const not_c[] = {
+		"j0", "j1", "jn", "y0", "y1", "yn", "drem", "scalb",
+		"lgamma_r", "lgammaf_r", "lgammal_r", "sincos",
+		"exp10", "pow10", "significand", 0
+	};
+	/* EDOM without an error flag: "If y is zero, whether a domain error
+	   occurs ... is implementation defined", also when x is a NaN, and
+	   pow(0, 0) and atan2(0, 0) "may" give one.  The tests don't say which
+	   row has these arguments, so a spurious EDOM elsewhere in these
+	   functions isn't noticed.  */
+	static const char *const may_edom[] = {
+		"fmod", "remainder", "remquo", "pow", "atan2", 0
+	};
+	int err = want & (INVALID|DIVBYZERO|OVERFLOW|UNDERFLOW);
+	int e = mtest_errno;
+	int ok;
+
+	mtest_errno_bad = 0;
+#ifdef math_errhandling
+	if (!(math_errhandling & MATH_ERRNO))
+		return 1;
+#else
+	return 1;	/* nothing promised */
+#endif
+	if (mtest_errno_state != 2)
+		return 1;	/* the test doesn't bracket the call */
+	if (mtest_func(file, not_c))
+		return 1;
+	if (!err)
+		ok = e == 0 || (r != RN && e == ERANGE)
+		     || (e == EDOM && mtest_func(file, may_edom));
+	else if (want & (INVALID|DIVBYZERO))
+		ok = e == 0 || e == EDOM || e == ERANGE;
+	else
+		ok = e == 0 || e == ERANGE;
+	if (ok && (want & INVALID) && mtest_func(file, domain_errors))
+		ok = e == EDOM;
+	if (ok && (want & OVERFLOW) && mtest_func(file, overflows))
+		ok = e == ERANGE;
+	if (!ok)
+		printf("%s: errno %s after a call that %s\n", file,
+		       e == EDOM ? "EDOM" : e == ERANGE ? "ERANGE" : e ? "set" : "0",
+		       err ? "should report an error" : "should not set errno");
+	mtest_errno_bad = !ok;
+	return ok;
+}
+
+static int checkexceptflags(int got, int want, int r)
 {
 #ifdef math_errhandling
 	/* without MATH_ERREXCEPT, C doesn't require the math functions to
@@ -118,10 +257,21 @@ static int checkexcept(int got, int want, int r)
 	return (got|INEXACT|UNDERFLOW) == (want|INEXACT|UNDERFLOW);
 }
 
-static int checkexceptall(int got, int want, int r)
+static int checkexceptallflags(int got, int want, int r)
 {
+#if defined MTEST_ERRNO_ONLY && !defined FE_INEXACT
+	/* the flags are only what the test expects: none are raised */
+	return 1;
+#endif
 	return got == want;
 }
+
+/* Both check the flags and errno, each where math_errhandling promises it.
+   Macros, for the test's __FILE__.  */
+#define checkexcept(got, want, r) \
+	(checkexceptflags(got, want, r) & mtest_checkerrno(__FILE__, want, r))
+#define checkexceptall(got, want, r) \
+	(checkexceptallflags(got, want, r) & mtest_checkerrno(__FILE__, want, r))
 
 static int checkulp(float d, int r)
 {
