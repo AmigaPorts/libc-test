@@ -125,6 +125,9 @@ float ulperrl(long double got, long double want, float dwant);
    right before it, which clears errno too, and fetestexcept() right after,
    whose first call keeps errno.  */
 static int mtest_errno, mtest_errno_state;
+/* Whether the last check found errno wrong, for the tests that tolerate
+   some flag mismatches: the tolerance is for the flags, not for errno.  */
+static int mtest_errno_bad;
 
 static int mtest_feclearexcept(int e)
 {
@@ -190,15 +193,22 @@ static int mtest_checkerrno(const char *file, int want, int r)
 	/* not in C, so not covered by math_errhandling */
 	static const char *const not_c[] = {
 		"j0", "j1", "jn", "y0", "y1", "yn", "drem", "scalb",
-		"lgamma_r", "exp10", "pow10", "significand", 0
+		"lgamma_r", "lgammaf_r", "lgammal_r", "sincos",
+		"exp10", "pow10", "significand", 0
 	};
-	/* "If y is zero, whether a domain error occurs ... is implementation
-	   defined", also when x is a NaN */
-	static const char *const y_zero[] = { "fmod", "remainder", "remquo", 0 };
+	/* EDOM without an error flag: "If y is zero, whether a domain error
+	   occurs ... is implementation defined", also when x is a NaN, and
+	   pow(0, 0) and atan2(0, 0) "may" give one.  The tests don't say which
+	   row has these arguments, so a spurious EDOM elsewhere in these
+	   functions isn't noticed.  */
+	static const char *const may_edom[] = {
+		"fmod", "remainder", "remquo", "pow", "atan2", 0
+	};
 	int err = want & (INVALID|DIVBYZERO|OVERFLOW|UNDERFLOW);
 	int e = mtest_errno;
 	int ok;
 
+	mtest_errno_bad = 0;
 #ifdef math_errhandling
 	if (!(math_errhandling & MATH_ERRNO))
 		return 1;
@@ -211,7 +221,7 @@ static int mtest_checkerrno(const char *file, int want, int r)
 		return 1;
 	if (!err)
 		ok = e == 0 || (r != RN && e == ERANGE)
-		     || (e == EDOM && mtest_func(file, y_zero));
+		     || (e == EDOM && mtest_func(file, may_edom));
 	else if (want & (INVALID|DIVBYZERO))
 		ok = e == 0 || e == EDOM || e == ERANGE;
 	else
@@ -224,6 +234,7 @@ static int mtest_checkerrno(const char *file, int want, int r)
 		printf("%s: errno %s after a call that %s\n", file,
 		       e == EDOM ? "EDOM" : e == ERANGE ? "ERANGE" : e ? "set" : "0",
 		       err ? "should report an error" : "should not set errno");
+	mtest_errno_bad = !ok;
 	return ok;
 }
 
