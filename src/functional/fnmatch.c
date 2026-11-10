@@ -47,6 +47,10 @@ static char *flagstr(const struct xlat *map, int flags)
 	return buf;
 }
 
+/* An expected value for a pattern that POSIX and musl read differently:
+   either a match or FNM_NOMATCH passes.  */
+#define EITHER 0x7fff
+
 /* tests harness adapted from glibc testfnm.c */
 struct {
 	const char *pattern;
@@ -70,8 +74,15 @@ struct {
 	{ "a*.c", "a/x.c", FNM_PATHNAME, FNM_NOMATCH },
 	{ "*/foo", "/foo", FNM_PATHNAME, 0 },
 	{ "-O[01]", "-O1", 0, 0 },
-	{ "[[?*\\]", "\\", 0, 0 },
-	{ "[]?*\\]", "]", 0, 0 },
+	/* Without FNM_NOESCAPE, POSIX makes a backslash an escape inside a
+	   bracket expression too (XCU 2.13.1, 2.14.1 in POSIX.1-2024): the
+	   \] doesn't close the bracket, and these two don't match, as with
+	   glibc.  musl takes the backslash there as an ordinary character, and
+	   they match.  With the backslash escaped, both readings agree.  */
+	{ "[[?*\\]", "\\", 0, EITHER },
+	{ "[]?*\\]", "]", 0, EITHER },
+	{ "[[?*\\\\]", "\\", 0, 0 },
+	{ "[]?*\\\\]", "]", 0, 0 },
 	/* initial right-bracket tests */
 	{ "[!]a-]", "b", 0, 0 },
 	{ "[]-_]", "^", 0, 0 }, /* range: ']', '^', '_' */
@@ -152,7 +163,8 @@ int main(void)
 
 		r = fnmatch(tests[i].pattern, tests[i].string, tests[i].flags);
 		x = tests[i].expected;
-		if (r != x && (r != FNM_NOMATCH || x != -FNM_NOMATCH)) {
+		if (x == EITHER ? r != 0 && r != FNM_NOMATCH :
+		    r != x && (r != FNM_NOMATCH || x != -FNM_NOMATCH)) {
 			t_error("fnmatch(\"%s\", \"%s\", %s) failed, got %d want %d\n",
 				tests[i].pattern, tests[i].string,
 				flagstr(fnmatch_flags, tests[i].flags),
