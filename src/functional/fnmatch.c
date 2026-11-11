@@ -159,12 +159,15 @@ int main(void)
 	int i;
 
 	for (i = 0; i < sizeof(tests) / sizeof(*tests); i++) {
-		int r, x;
+		int r, x, ok;
 
 		r = fnmatch(tests[i].pattern, tests[i].string, tests[i].flags);
 		x = tests[i].expected;
-		if (x == EITHER ? r != 0 && r != FNM_NOMATCH :
-		    r != x && (r != FNM_NOMATCH || x != -FNM_NOMATCH)) {
+		if (x == EITHER)
+			ok = r == 0 || r == FNM_NOMATCH;
+		else
+			ok = r == x || (r == FNM_NOMATCH && x == -FNM_NOMATCH);
+		if (!ok) {
 			t_error("fnmatch(\"%s\", \"%s\", %s) failed, got %d want %d\n",
 				tests[i].pattern, tests[i].string,
 				flagstr(fnmatch_flags, tests[i].flags),
